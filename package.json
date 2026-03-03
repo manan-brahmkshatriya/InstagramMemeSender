@@ -1,0 +1,23 @@
+{
+  "name": "instagram-bot",
+  "version": "1.0.0",
+  "description": "MCP server for Instagram - scrapes and sends reels to configured DM threads",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "node-cron": "^3.0.3",
+    "puppeteer": "^24.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.7.0"
+  }
+}

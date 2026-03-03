@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Compiled output
+dist/
+
+# Instagram session data (browser cookies/profile)
+.instagram-session/
+.instagram-session-*/
+
+# Config & history (contains credentials and personal data)
+.instagram-config.json
+.instagram-history.json
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
