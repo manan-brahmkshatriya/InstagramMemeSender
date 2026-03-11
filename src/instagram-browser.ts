@@ -55,6 +55,17 @@ class InstagramBrowser {
       });
     });
 
+    // Load saved cookies if present (from manual login)
+    const cookiePath = path.join(ACTIVE_SESSION_DIR, "cookies.json");
+    try {
+      const { readFileSync } = await import("fs");
+      const cookies = JSON.parse(readFileSync(cookiePath, "utf-8"));
+      await this.page.setCookie(...cookies);
+      log(`instagram-browser: loaded ${cookies.length} saved cookies`);
+    } catch {
+      // No cookie file — will rely on userDataDir or fresh login
+    }
+
     log("instagram-browser: browser launched");
   }
 
@@ -132,14 +143,21 @@ class InstagramBrowser {
       await page.type(passwordSelector, creds.password, { delay: 90 });
       await this.randomDelay(600, 1200);
 
-      // Submit
+      // Submit — try button click first, fall back to Enter key
       const submitBtn =
         (await page.$('button[type="submit"]')) ??
         (await page.$('input[type="submit"]'));
-      if (!submitBtn) {
-        throw new Error("Instagram login submit button not found.");
+      try {
+        if (submitBtn) {
+          await page.evaluate((el) => (el as HTMLElement).click(), submitBtn);
+        } else {
+          await page.keyboard.press("Enter");
+        }
+      } catch {
+        // If element click fails, press Enter from the password field
+        await page.focus(passwordSelector);
+        await page.keyboard.press("Enter");
       }
-      await submitBtn.click();
 
       // Wait for navigation away from login page
       try {

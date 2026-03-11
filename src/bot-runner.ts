@@ -60,9 +60,8 @@ export async function runForThread(thread: InstagramThread): Promise<SendResult>
     return result;
   }
 
-  // Get lifetime sent URLs for deduplication
-  const sentUrlsList = configManager.getSentUrls(thread.threadId);
-  const alreadySentUrls = new Set(sentUrlsList);
+  // Global dedup — never repeat a reel across ANY thread
+  const alreadySentUrls = configManager.getGlobalSentUrls();
 
   // Keep scrape target tight for faster "send one now" runs while retaining small fallback.
   const scrapeTarget = Math.min(remainingToday + 1, 3);
@@ -175,8 +174,8 @@ export async function runForThreadNoView(thread: InstagramThread): Promise<SendR
     return result;
   }
 
-  const sentUrlsList = configManager.getSentUrls(thread.threadId);
-  const alreadySentUrls = new Set(sentUrlsList);
+  // Global dedup — never repeat a reel across ANY thread
+  const alreadySentUrls = configManager.getGlobalSentUrls();
 
   let reelUrls: string[];
   try {

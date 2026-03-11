@@ -186,6 +186,16 @@ class ConfigManager {
     return history.threads[threadId]?.sentReelUrls ?? [];
   }
 
+  /** Returns the union of every reel ever sent across ALL threads — global dedup pool. */
+  getGlobalSentUrls(): Set<string> {
+    const history = readHistory();
+    const all = new Set<string>();
+    for (const record of Object.values(history.threads)) {
+      for (const url of record.sentReelUrls) all.add(url);
+    }
+    return all;
+  }
+
   recordSentReel(threadId: string, reelUrl: string): void {
     const history = readHistory();
     const today = new Date().toISOString().split("T")[0];

@@ -11,9 +11,11 @@ dist/
 # Config & history (contains credentials and personal data)
 .instagram-config.json
 .instagram-history.json
+.reel-generator-config.json
 
 # Logs
 *.log
 
 # macOS
 .DS_Store
+ios-app/.derived/
