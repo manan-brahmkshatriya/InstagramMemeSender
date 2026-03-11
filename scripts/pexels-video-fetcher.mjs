@@ -138,21 +138,29 @@ function downloadFile(url, destPath, depth = 0) {
 }
 
 // ── Best video file selector ───────────────────────────────────────────────
-// Priority: portrait+hd > portrait-any > hd-any > first available
+// Priority: 1080p portrait → 720p portrait → portrait HD → any portrait → HD → first
+// Always picks highest available resolution for Instagram Reel quality.
 function selectBestVideoFile(videoFiles) {
   const isPortrait = f => f.width > 0 && f.height > 0 && f.width < f.height;
   const isHD       = f => f.quality === "hd";
+  const byResDesc  = arr => [...arr].sort((a, b) => (b.width * b.height) - (a.width * a.height));
 
-  const portraitHD  = videoFiles.filter(f => isPortrait(f) && isHD(f));
+  const portrait1080 = byResDesc(videoFiles.filter(f => isPortrait(f) && f.height >= 1080));
+  if (portrait1080.length > 0) return portrait1080[0];
+
+  const portrait720 = byResDesc(videoFiles.filter(f => isPortrait(f) && f.height >= 720));
+  if (portrait720.length > 0) return portrait720[0];
+
+  const portraitHD = byResDesc(videoFiles.filter(f => isPortrait(f) && isHD(f)));
   if (portraitHD.length > 0) return portraitHD[0];
 
-  const portraitAny = videoFiles.filter(f => isPortrait(f));
+  const portraitAny = byResDesc(videoFiles.filter(isPortrait));
   if (portraitAny.length > 0) return portraitAny[0];
 
-  const hdAny = videoFiles.filter(f => isHD(f));
+  const hdAny = byResDesc(videoFiles.filter(isHD));
   if (hdAny.length > 0) return hdAny[0];
 
-  return videoFiles[0] ?? null;
+  return byResDesc(videoFiles)[0] ?? null;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -175,7 +183,8 @@ export async function fetchAndDownloadPexelsVideo(
   ensureTmpDir();
 
   const query = encodeURIComponent(theme);
-  const url = `https://api.pexels.com/videos/search?query=${query}&per_page=15&orientation=portrait&page=${pageNum}`;
+  // per_page=30 gives more 720p/1080p candidates to pick from; size=large biases toward HD
+  const url = `https://api.pexels.com/videos/search?query=${query}&per_page=30&orientation=portrait&size=large&page=${pageNum}`;
 
   log(`Searching Pexels: "${theme}" (page ${pageNum})`);
   const data = await pexelsGet(url, apiKey);

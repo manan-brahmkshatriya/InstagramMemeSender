@@ -16,7 +16,7 @@ import { fileURLToPath } from "url";
 import { fetchAndDownloadPexelsVideo, cleanupVideoFile } from "./pexels-video-fetcher.mjs";
 import { uploadReelToFeed } from "./reel-feed-uploader.mjs";
 import { overlayQuoteOnVideo } from "./video-quote-overlay.mjs";
-import { pickNextQuote } from "./quotes.mjs";
+import { drawNextQuote, initDeck } from "./quotes.mjs";
 
 // ── Paths ───────────────────────────────────────────────────────────────────
 const __dirname    = path.dirname(fileURLToPath(import.meta.url));
@@ -25,13 +25,36 @@ const CONFIG_FILE  = path.join(PROJECT_ROOT, ".reel-generator-config.json");
 const LOG_FILE     = "/tmp/reel-generator-daemon.log";
 const WINDOW_MS    = 24 * 60 * 60 * 1000; // 24 hours
 
-// ── Caption pool — Instagram caption with hashtags, rotated each post ───────
-const CAPTIONS = [
-  "Start every day with a grateful heart 🌅 #motivation #inspiration #mindset #success #dailymotivation",
-  "Your only limit is your mind 💪 #motivational #inspiration #growth #mindset #success",
-  "Small steps every day = big changes 🌱 #motivation #progress #consistency #success #goals",
-  "The best view comes after the hardest climb 🏔️ #inspiration #nature #motivation #success #life",
+// ── Hashtag sets — 8 rotating packs of 25-30 hashtags for maximum reach ────
+// Instagram allows 30 hashtags. We rotate sets to avoid repetition penalties.
+const HASHTAG_SETS = [
+  "#motivation #success #mindset #inspiration #goals #hustle #entrepreneur #grind #blessed #lifestyle #positivevibes #motivationalquotes #dailymotivation #successmindset #believeinyourself #nevergiveup #workhard #ambition #dreambig #inspire #focus #discipline #selfimprovement #growth #winning",
+  "#inspiration #life #love #happiness #quotes #motivational #positive #growth #winning #abundance #grateful #manifest #lawofattraction #affirmations #mindfulness #selfcare #personaldevelopment #innerpeace #consciousness #awakening #vibehigh #abundance #purpose #healing #growthmindset",
+  "#discipline #hardwork #dedication #success #champion #grindset #wakeup #morningroutine #healthymindset #strongmind #consistency #habits #productivity #focusedmind #resultsonly #noexcuses #levelup #earnit #grit #relentless #unstoppable #dailygrind #powerful #limitless #rise",
+  "#dailymotivation #morningmotivation #fitnessmotivation #businessmotivation #entrepreneurship #startuplife #CEO #leadershipquotes #businessmindset #millionairemindset #moneymindset #financialfreedom #successquotes #inspirationalquotes #quoteoftheday #quotesdaily #quotestoliveby #mindsetcoach #lifecoach #selfmastery",
+  "#positivity #goodvibes #gratitude #blessed #universe #highvibes #selflove #selfbelief #innerstrength #resilience #comeback #transformation #changeyourlife #breakthrough #reinvention #growth #possibility #potential #confidence #empower #uplifting #encouragement #hope #faith #light",
+  "#hustle #grind #businessowner #successhabits #millionairehabits #morningroutine #nightroutine #routines #productivity #deepwork #highperformance #peakperformance #focus #flowstate #mentalstrength #executivemindset #strategicthinking #leadershipdevelopment #personalbranding #contentcreator",
+  "#quotes #lifequotes #deepquotes #powerfulmessage #quotestagram #quotesforlife #quotesinspiration #wordsofwisdom #wordstolive #mindsetquotes #successquotes #bossquotes #reelquotes #instaquotes #quotepost #thoughtoftheday #dailythought #insightful #realtalk #truth #perspective #wisdomquotes",
+  "#reels #reelsvideo #reelsindia #reelsinstagram #reelstagram #instareels #viralreels #trendingreels #explore #explorepage #trending #viral #instadaily #instagood #content #contentcreation #creator #mindset #growth #motivation #success #inspire #dreams #hustle #believe",
 ];
+
+// ── Caption builder — combines a short opener with a rich hashtag set ───────
+const CAPTION_OPENERS = [
+  "Start every day with a grateful heart 🌅",
+  "Your only limit is your mind 💪",
+  "Small steps every day = big changes 🌱",
+  "The best view comes after the hardest climb 🏔️",
+  "Be the energy you want to attract ✨",
+  "Rise and grind — your future is waiting 🔥",
+  "Believe it. Achieve it. Repeat 🎯",
+  "Hard work always beats excuses 💥",
+];
+
+function buildCaption(captionIndex, hashtagIndex) {
+  const opener  = CAPTION_OPENERS[captionIndex % CAPTION_OPENERS.length];
+  const hashtags = HASHTAG_SETS[hashtagIndex % HASHTAG_SETS.length];
+  return `${opener}\n\n${hashtags}`;
+}
 
 // ── Logging ─────────────────────────────────────────────────────────────────
 function log(msg) {
@@ -65,17 +88,15 @@ function writeConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
 }
 
-function recordPostedVideo(videoId) {
-  const config = readConfig();
-  if (!config.postedVideoIds.includes(videoId)) {
-    config.postedVideoIds.push(videoId);
+function recordPostedVideo(videoId, updatedConfig) {
+  // updatedConfig already has the advanced deck position from drawNextQuote
+  if (!updatedConfig.postedVideoIds.includes(videoId)) {
+    updatedConfig.postedVideoIds.push(videoId);
   }
-  // Advance both caption and quote indices
-  config.captionIndex = ((config.captionIndex ?? 0) + 1) % CAPTIONS.length;
-  const { nextIndex }  = pickNextQuote(config.quoteIndex ?? 0);
-  config.quoteIndex    = nextIndex;
-  writeConfig(config);
-  log(`Recorded video ID ${videoId} — caption→${config.captionIndex}, quote→${config.quoteIndex}`);
+  updatedConfig.captionIndex   = ((updatedConfig.captionIndex ?? 0) + 1) % CAPTION_OPENERS.length;
+  updatedConfig.hashtagIndex   = ((updatedConfig.hashtagIndex ?? 0) + 1) % HASHTAG_SETS.length;
+  writeConfig(updatedConfig);
+  log(`Recorded video ID ${videoId} — caption→${updatedConfig.captionIndex}, deck pos→${updatedConfig.quoteDeckPos}`);
 }
 
 // ── Post one reel ────────────────────────────────────────────────────────────
@@ -87,14 +108,14 @@ async function postOneReel(reelIndex) {
   }
 
   const theme   = config.themes[reelIndex % config.themes.length];
-  const caption = CAPTIONS[(config.captionIndex ?? 0) % CAPTIONS.length];
 
-  // Pick a unique motivational quote for the video overlay
-  const { quote } = pickNextQuote(config.quoteIndex ?? 0);
+  // Draw the next unique quote from the shuffle-deck
+  const { quote, updatedConfig } = drawNextQuote(config);
+  const caption = buildCaption(updatedConfig.captionIndex ?? 0, updatedConfig.hashtagIndex ?? 0);
 
   log(`--- Posting reel ${reelIndex + 1}: theme="${theme}" ---`);
   log(`    Quote:   ${quote}`);
-  log(`    Caption: ${caption}`);
+  log(`    Caption: ${caption.split("\n")[0]}  [+ ${caption.split(" ").filter(w=>w.startsWith("#")).length} hashtags]`);
 
   let rawFilePath     = null;
   let overlaidPath    = null;
@@ -121,7 +142,7 @@ async function postOneReel(reelIndex) {
     if (!uploadOk) throw new Error("uploadReelToFeed returned false");
 
     // Step 4: Record success
-    recordPostedVideo(videoId);
+    recordPostedVideo(videoId, updatedConfig);
     log(`✅ Reel ${reelIndex + 1} posted successfully (Pexels ID ${videoId})`);
     return true;
 
@@ -204,20 +225,18 @@ if (!fs.existsSync(cfg.cookieFile)) {
   process.exit(1);
 }
 
+// Initialise shuffle-deck on first run (persists to config file)
+const initialised = initDeck(cfg);
+writeConfig(initialised);
+
 log("=".repeat(60));
 log("Reel Generator Daemon started");
 log(`Account:     ${cfg.account}`);
 log(`Daily count: ${cfg.dailyCount}`);
 log(`Themes:      ${cfg.themes.join(", ")}`);
 log(`Videos used: ${(cfg.postedVideoIds ?? []).length}`);
-log(`Quote index: ${cfg.quoteIndex ?? 0}`);
+log(`Quote deck:  ${cfg.quoteDeckPos ?? 0} / ${cfg.quoteDeck?.length ?? 0} shown`);
 log("=".repeat(60));
-
-// Ensure quoteIndex exists in config
-if (cfg.quoteIndex === undefined) {
-  cfg.quoteIndex = 0;
-  writeConfig(cfg);
-}
 
 // Start the first window
 planWindow();

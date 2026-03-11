@@ -327,7 +327,7 @@ export async function uploadReelToFeed(filePath, caption, cookieFile) {
 
     // ── Step 9: Wait for confirmation ─────────────────────────────────────
     log("Step 9: Waiting for confirmation...");
-    const confirmed = await waitForShareComplete(page, 60000);
+    const confirmed = await waitForShareComplete(page, 120000);
     if (confirmed) {
       log("✅ Reel posted successfully!");
     } else {

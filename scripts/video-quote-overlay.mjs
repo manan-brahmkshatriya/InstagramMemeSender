@@ -180,7 +180,12 @@ export function overlayQuoteOnVideo(inputPath, quote, outputPath) {
     );
   });
 
-  const filterComplex = [drawBoxFilter, ...drawTextFilters].join(",");
+  // Scale down to 1080p portrait max — Instagram re-encodes to 1080p anyway,
+  // and smaller files upload much faster. Uses scale2ref to preserve aspect ratio.
+  // If the video is already ≤1080px wide we skip this (scale filter is a no-op when
+  // w is already ≤ 1080, but we still want the drawtext on top).
+  const scaleFilter   = `scale='min(1080,iw)':'-2'`;   // keep width ≤1080, height auto
+  const filterComplex = [scaleFilter, drawBoxFilter, ...drawTextFilters].join(",");
 
   console.log(`[overlay] Applying ${numLines}-line quote: "${quote}"`);
   console.log(`[overlay] Font size: ${fontSize}px, box: ${boxX},${boxY} ${boxW}x${boxH}`);
@@ -190,8 +195,10 @@ export function overlayQuoteOnVideo(inputPath, quote, outputPath) {
     "-vf", filterComplex,
     "-c:a", "copy",        // keep original audio untouched
     "-c:v", "libx264",
-    "-crf", "23",          // good quality, reasonable file size
-    "-preset", "fast",
+    "-crf", "18",          // high quality (18 = near-lossless visually; was 23)
+    "-preset", "medium",   // better compression efficiency than "fast"
+    "-pix_fmt", "yuv420p", // ensure broad compatibility
+    "-movflags", "+faststart", // web-optimised — plays before fully downloaded
     "-y",                  // overwrite output if exists
     outputPath,
   ], { stdio: "pipe" });
