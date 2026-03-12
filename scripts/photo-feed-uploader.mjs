@@ -188,9 +188,15 @@ export async function uploadPhotoToFeed(filePath, caption, cookieFile, profileUr
     await page.screenshot({ path: "/tmp/photo-upload-step1.png" });
 
     // ── Step 2: Upload the image file ─────────────────────────────────────
-    // The upload dialog may show a "Select from computer" button or expose the
-    // file input directly. Click "Select from computer" if visible, then attach.
+    // Register a filechooser handler BEFORE clicking "Select from computer".
+    // When Instagram's button internally calls input.click(), Puppeteer
+    // intercepts the OS file-picker dialog and accepts it programmatically
+    // so the dialog never appears / gets stuck open on screen.
     log("Step 2: Uploading image file...");
+
+    let fcResolve;
+    const fcPromise = new Promise(r => { fcResolve = r; });
+    page.once("filechooser", fcResolve);
 
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll("button, div[role='button']"));
@@ -201,13 +207,21 @@ export async function uploadPhotoToFeed(filePath, caption, cookieFile, profileUr
       );
       if (sel) sel.click();
     });
-    await sleep(500);
 
-    const fileInput = await page.$('input[type="file"]');
-    if (!fileInput) throw new Error("File input not found in upload modal");
-
-    await fileInput.uploadFile(filePath);
-    log(`File upload initiated: ${filePath}`);
+    // Wait up to 3 s for the chooser; fall back to direct input upload
+    const fileChooser = await Promise.race([
+      fcPromise,
+      sleep(3000).then(() => { page.off("filechooser", fcResolve); return null; }),
+    ]);
+    if (fileChooser) {
+      await fileChooser.accept([filePath]);
+      log(`File chooser intercepted and accepted: ${filePath}`);
+    } else {
+      const fileInput = await page.$('input[type="file"]');
+      if (!fileInput) throw new Error("File input not found in upload modal");
+      await fileInput.uploadFile(filePath);
+      log(`File uploaded directly to input: ${filePath}`);
+    }
     await sleep(3000);
     await page.screenshot({ path: "/tmp/photo-upload-step2.png" });
 
@@ -308,7 +322,13 @@ export async function uploadPhotoToFeed(filePath, caption, cookieFile, profileUr
         };
         page.on("response", responseHandler);
 
-        // Click "..." More options
+        // Wait for "..." More options button to be visible, then click it
+        const moreOptEl = await page.waitForSelector(
+          'svg[aria-label="More options"]',
+          { visible: true, timeout: 10000 }
+        ).catch(() => null);
+        if (!moreOptEl) throw new Error('"More options" button not found on post page');
+
         await page.evaluate(() => {
           const svgs = Array.from(document.querySelectorAll('svg[aria-label="More options"]'));
           for (const svg of svgs) {
@@ -324,16 +344,18 @@ export async function uploadPhotoToFeed(filePath, caption, cookieFile, profileUr
         });
         await sleep(1500);
 
-        // Click "Edit"
-        await page.evaluate(() => {
+        // Wait for Edit menu item to appear, then click it
+        const editClicked = await page.evaluate(() => {
           const btns = Array.from(document.querySelectorAll(
             "button, div[role='button'], div[role='menuitem']"
           ));
           const edit = btns.find(b =>
             b.textContent.trim() === "Edit" && b.offsetParent !== null
           );
-          if (edit) edit.click();
+          if (edit) { edit.click(); return true; }
+          return false;
         });
+        if (!editClicked) throw new Error('"Edit" menu item not found after clicking More options');
         await sleep(3000);
         await page.screenshot({ path: "/tmp/photo-edit-modal.png" });
 
@@ -351,23 +373,26 @@ export async function uploadPhotoToFeed(filePath, caption, cookieFile, profileUr
         await page.keyboard.type(caption, { delay: 15 });
         await sleep(800);
 
-        // Verify text is in the DOM
-        const captionResult = await page.evaluate((sel) => {
-          const div = document.querySelector(sel);
-          return div
-            ? `${div.textContent.trim().length} chars: "${div.textContent.trim().slice(0, 80)}"`
-            : "not found";
-        }, captionSelector);
+        // Verify text using the existing element handle — avoids the issue where
+        // Instagram mutates aria-label after typing (adds character count) which
+        // would make document.querySelector return null on a re-query.
+        const captionResult = await captionEl.evaluate(el =>
+          el.isConnected
+            ? `${el.textContent.trim().length} chars: "${el.textContent.trim().slice(0, 80)}"`
+            : "element detached from DOM"
+        );
         log(`Caption entered: ${captionResult}`);
         await page.screenshot({ path: "/tmp/photo-caption-before-done.png" });
 
-        // Click "Done" (Edit modal header, y < 150)
+        // Click "Done" in the Edit modal header.
+        // Use y < 200 (not 150) — the header sits at ~100 px but give extra room
+        // for minor viewport/zoom differences across Instagram A/B variants.
         const doneClicked = await page.evaluate(() => {
           const all = Array.from(document.querySelectorAll("button, div[role='button']"));
           const done = all.find(el => {
             if (el.textContent.trim() !== "Done") return false;
             const b = el.getBoundingClientRect();
-            return b.y < 150 && b.width > 0 && el.offsetParent !== null;
+            return b.y < 200 && b.width > 0 && el.offsetParent !== null;
           });
           if (done) { done.click(); return true; }
           return false;
