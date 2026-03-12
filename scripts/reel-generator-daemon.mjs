@@ -138,7 +138,7 @@ async function postOneReel(reelIndex) {
     log(`Overlay complete → ${overlaidPath}`);
 
     // Step 3: Upload the overlaid video to Instagram as Reel
-    const uploadOk = await uploadReelToFeed(overlaidPath, caption, config.cookieFile);
+    const uploadOk = await uploadReelToFeed(overlaidPath, caption, config.cookieFile, "https://www.instagram.com/riseclub9/");
     if (!uploadOk) throw new Error("uploadReelToFeed returned false");
 
     // Step 4: Record success

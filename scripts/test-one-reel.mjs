@@ -93,7 +93,8 @@ try {
 
   // Step 3: Upload to Instagram as Reel
   log("\nStep 3: Uploading to Instagram as Reel...");
-  const uploadOk = await uploadReelToFeed(overlaidPath, caption, config.cookieFile);
+  const PROFILE_URL = "https://www.instagram.com/riseclub9/";
+  const uploadOk = await uploadReelToFeed(overlaidPath, caption, config.cookieFile, PROFILE_URL);
 
   if (uploadOk) {
     log("\n✅ TEST PASSED — Reel with quote posted successfully!");

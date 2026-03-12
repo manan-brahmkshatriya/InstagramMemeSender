@@ -3,7 +3,13 @@
  * Uploads an MP4 file as an Instagram Reel to the feed (not DMs).
  *
  * Exports:
- *   uploadReelToFeed(filePath, caption, cookieFile) → Promise<boolean>
+ *   uploadReelToFeed(filePath, caption, cookieFile, profileUrl?) → Promise<boolean>
+ *
+ * Caption strategy: Post the reel first (Steps 8-9), then navigate to the new
+ * post and apply the caption via the Edit flow (Step 10). The Edit modal's
+ * caption field is a contenteditable div — we type into it using
+ * page.keyboard.type() which fires real browser input events that React's
+ * state machine responds to (unlike execCommand or CDP insertText).
  */
 
 import puppeteer from "puppeteer";
@@ -105,37 +111,62 @@ async function waitForVideoProcessed(page, timeoutMs = 120000) {
 }
 
 // ── Wait for "Sharing" spinner and then confirmation ──────────────────────
+// Returns { confirmed: boolean, postUrl: string|null }
+// postUrl is set when Instagram shows a "View post" link in the confirmation.
 async function waitForShareComplete(page, timeoutMs = 60000) {
   log("Waiting for share to complete...");
   const start = Date.now();
 
   // First wait for "Sharing" spinner to appear (indicates server upload started)
-  let sharingStarted = false;
   for (let i = 0; i < 15; i++) {
     const sharing = await page.evaluate(() =>
       document.body.innerText.includes("Sharing")
     );
-    if (sharing) { sharingStarted = true; log("Sharing in progress..."); break; }
+    if (sharing) { log("Sharing in progress..."); break; }
     await sleep(1000);
   }
 
   // Then wait for it to finish
   while (Date.now() - start < timeoutMs) {
-    const done = await page.evaluate(() => {
+    const result = await page.evaluate(() => {
       const t = document.body.innerText;
-      return (
+
+      // Case 1: explicit "shared" message — the upload dialog is still open/visible.
+      // Look for the "View post" link ONLY inside the dialog so we don't accidentally
+      // pick up random posts from the feed that's loading in the background.
+      const explicitDone =
         t.includes("Your reel has been shared") ||
         t.includes("Reel shared") ||
-        t.includes("has been shared") ||
-        (!t.includes("Sharing") &&
-          !document.querySelector('div[aria-label*="caption"]'))
-      );
+        t.includes("has been shared");
+
+      if (explicitDone) {
+        const dialog = document.querySelector('[role="dialog"]');
+        const root   = dialog || document.body;
+        const links  = Array.from(root.querySelectorAll("a[href]"));
+        const postLink = links.find(a =>
+          /\/(reel|p)\/[A-Za-z0-9_-]{5,}/.test(a.href)
+        );
+        return { confirmed: true, postUrl: postLink ? postLink.href : null };
+      }
+
+      // Case 2: modal already closed (back on the feed).
+      // Do NOT scan for links here — they would be someone else's posts.
+      // Return postUrl: null so Step 10 falls back to the profile-grid search.
+      if (!t.includes("Sharing") && !document.querySelector('div[aria-label*="caption"]')) {
+        return { confirmed: true, postUrl: null };
+      }
+
+      return null;
     });
-    if (done) { log("Share confirmed!"); return true; }
+
+    if (result) {
+      log(`Share confirmed! New post URL: ${result.postUrl || "not found — will use profile fallback"}`);
+      return result;
+    }
     await sleep(1000);
   }
   log("Share confirmation timeout (post may still have succeeded)");
-  return false;
+  return { confirmed: false, postUrl: null };
 }
 
 // ── Main export ────────────────────────────────────────────────────────────
@@ -146,9 +177,10 @@ async function waitForShareComplete(page, timeoutMs = 60000) {
  * @param {string} filePath   - Absolute path to .mp4 file
  * @param {string} caption    - Caption with hashtags
  * @param {string} cookieFile - Path to saved cookies JSON
+ * @param {string} profileUrl - Full Instagram profile URL (used to find post after share for caption editing)
  * @returns {Promise<boolean>}
  */
-export async function uploadReelToFeed(filePath, caption, cookieFile) {
+export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl = null) {
   if (!fs.existsSync(filePath))  throw new Error(`Video not found: ${filePath}`);
   if (!fs.existsSync(cookieFile)) throw new Error(`Cookie file not found: ${cookieFile}`);
 
@@ -289,36 +321,14 @@ export async function uploadReelToFeed(filePath, caption, cookieFile) {
     }
     await page.screenshot({ path: "/tmp/reel-upload-step6.png" });
 
-    // ── Step 7: Type caption ──────────────────────────────────────────────
-    log("Step 7: Typing caption...");
-
-    // Wait for caption step
-    await page.waitForFunction(
-      () =>
-        !!document.querySelector('div[aria-label*="caption"]') ||
-        !!document.querySelector('div[aria-label*="Caption"]') ||
-        document.body.innerText.includes("Write a caption"),
-      { timeout: 20000 }
-    ).catch(() => {});
-
-    const captionOk = await page.evaluate((captionText) => {
-      const el =
-        document.querySelector('div[aria-label*="caption"]') ||
-        document.querySelector('div[aria-label*="Caption"]') ||
-        document.querySelector('div[role="textbox"]');
-      if (!el) return false;
-      el.focus();
-      document.execCommand("insertText", false, captionText);
-      return true;
-    }, caption);
-
-    if (!captionOk) {
-      log("Warning: caption field not found — continuing without caption");
-    } else {
-      log("Caption typed ✓");
-    }
-    await sleep(2000);
-    await page.screenshot({ path: "/tmp/reel-upload-step7.png" });
+    // ── Step 7: Caption ───────────────────────────────────────────────────
+    // Instagram's upload-flow caption field is a React-controlled contenteditable.
+    // All browser-side methods (keyboard.type, execCommand, CDP insertText) update
+    // the DOM visually but NOT React's internal state — Instagram reads React state
+    // on Share, so the caption comes through empty.
+    // Caption is applied reliably in Step 10 via the post-edit flow instead.
+    log("Step 7: Caption will be applied after posting (Step 10).");
+    await sleep(1000);
 
     // ── Step 8: Share (publish) ───────────────────────────────────────────
     log("Step 8: Clicking Share to publish...");
@@ -327,15 +337,159 @@ export async function uploadReelToFeed(filePath, caption, cookieFile) {
 
     // ── Step 9: Wait for confirmation ─────────────────────────────────────
     log("Step 9: Waiting for confirmation...");
-    const confirmed = await waitForShareComplete(page, 120000);
+    const { confirmed, postUrl: sharedPostUrl } = await waitForShareComplete(page, 120000);
     if (confirmed) {
       log("✅ Reel posted successfully!");
     } else {
       log("Share confirmation not detected — post may still have succeeded");
     }
 
+    // Also check if the current page URL IS the post (Instagram sometimes redirects)
+    const currentPageUrl = page.url();
+    log(`Current URL after share: ${currentPageUrl}`);
+    const directPostUrl =
+      sharedPostUrl ||
+      (/\/(reel|p)\/[A-Za-z0-9_-]{5,}/.test(currentPageUrl) ? currentPageUrl : null);
+
     await sleep(3000);
     await page.screenshot({ path: "/tmp/reel-upload-done.png" });
+
+    // ── Step 10: Edit caption after posting ───────────────────────────────
+    // Post first without a caption, then use the Edit flow to set it.
+    // The Edit modal's contenteditable responds to page.keyboard.type() because
+    // it fires real browser input events that React's event system processes.
+    if (caption && caption.trim().length > 0 && profileUrl) {
+      log("Step 10: Editing caption via Edit flow...");
+      try {
+        let postPageUrl = directPostUrl;
+
+        if (postPageUrl) {
+          log(`Using post URL from share confirmation: ${postPageUrl}`);
+        } else {
+          // Fall back: navigate to profile, wait for the new post to appear in the grid
+          log("Navigating to profile to find latest post...");
+          await page.goto(profileUrl, { waitUntil: "networkidle2", timeout: 30000 });
+
+          // Retry up to 5 times (with reload) until a post link appears
+          for (let attempt = 0; attempt < 5; attempt++) {
+            await sleep(3000);
+            postPageUrl = await page.evaluate(() => {
+              // Scope to <main> or [role="main"] to avoid nav/sidebar links
+              const root =
+                document.querySelector("main") ||
+                document.querySelector('[role="main"]') ||
+                document.body;
+              const links = Array.from(root.querySelectorAll("a[href]"));
+              const match = links.find(a =>
+                /\/(reel|p)\/[A-Za-z0-9_-]{5,}/.test(a.href) &&
+                a.offsetParent !== null
+              );
+              return match ? match.href : null;
+            });
+            if (postPageUrl) break;
+            log(`Post not visible in grid yet, reloading... (attempt ${attempt + 1}/5)`);
+            await page.reload({ waitUntil: "networkidle2", timeout: 30000 });
+          }
+        }
+
+        if (!postPageUrl) throw new Error("Could not find the new post URL to edit caption");
+        log(`Navigating to post: ${postPageUrl}`);
+        await page.goto(postPageUrl, { waitUntil: "networkidle2", timeout: 30000 });
+        await sleep(2500);
+
+        // Intercept API responses so we can see what endpoint Instagram calls
+        // when "Done" is clicked — useful for diagnosing if the save worked.
+        const apiLog = [];
+        const responseHandler = (response) => {
+          const url = response.url();
+          if (url.includes("/api/v1/") || url.includes("graphql")) {
+            apiLog.push(`${response.request().method()} ${url.replace("https://www.instagram.com", "")} → ${response.status()}`);
+          }
+        };
+        page.on("response", responseHandler);
+
+        // Click "..." More options
+        await page.evaluate(() => {
+          const svgs = Array.from(document.querySelectorAll('svg[aria-label="More options"]'));
+          for (const svg of svgs) {
+            let node = svg;
+            for (let i = 0; i < 5; i++) {
+              node = node.parentElement;
+              if (!node) break;
+              if (node.tagName === "BUTTON" || node.getAttribute("role") === "button") {
+                node.click(); return;
+              }
+            }
+          }
+        });
+        await sleep(1500);
+
+        // Click "Edit"
+        await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll(
+            "button, div[role='button'], div[role='menuitem']"
+          ));
+          const edit = btns.find(b => b.textContent.trim() === "Edit" && b.offsetParent !== null);
+          if (edit) edit.click();
+        });
+        await sleep(3000); // Wait for Edit modal to fully render
+        await page.screenshot({ path: "/tmp/reel-edit-modal.png" });
+
+        // Find the caption contenteditable in the Edit modal
+        const captionSelector = 'div[aria-label="Write a caption..."]';
+        const captionEl = await page.$(captionSelector);
+        if (!captionEl) throw new Error("Caption contenteditable not found in edit modal");
+
+        // Click to focus, select-all any existing text, then type the caption.
+        // page.keyboard.type() fires real keydown/keypress/input/keyup events —
+        // React's synthetic event system responds to these and updates its state.
+        await captionEl.click();
+        await sleep(300);
+        await page.keyboard.down("Meta"); // Cmd+A = select all on Mac
+        await page.keyboard.press("a");
+        await page.keyboard.up("Meta");
+        await sleep(200);
+        await page.keyboard.type(caption, { delay: 15 });
+        await sleep(800);
+
+        // Verify text is visible in the DOM
+        const captionResult = await page.evaluate((sel) => {
+          const div = document.querySelector(sel);
+          return div
+            ? `${div.textContent.trim().length} chars: "${div.textContent.trim().slice(0, 80)}"`
+            : "not found";
+        }, captionSelector);
+        log(`Caption entered: ${captionResult}`);
+        await page.screenshot({ path: "/tmp/reel-caption-before-done.png" });
+
+        // Click "Done" in the Edit modal header (y < 150 to avoid other Done-like buttons)
+        const doneClicked = await page.evaluate(() => {
+          const all = Array.from(document.querySelectorAll("button, div[role='button']"));
+          const done = all.find(el => {
+            if (el.textContent.trim() !== "Done") return false;
+            const b = el.getBoundingClientRect();
+            return b.y < 150 && b.width > 0 && el.offsetParent !== null;
+          });
+          if (done) { done.click(); return true; }
+          return false;
+        });
+        log(`Done button clicked: ${doneClicked}`);
+        await sleep(3000);
+
+        // Log intercepted API calls for diagnostics
+        page.off("response", responseHandler);
+        for (const entry of apiLog) {
+          log(`[API intercepted] ${entry}`);
+        }
+
+        await page.screenshot({ path: "/tmp/reel-upload-caption-saved.png" });
+        log("✅ Caption edit flow completed!");
+      } catch (editErr) {
+        log(`Caption edit failed: ${editErr.message} — post published without caption`);
+        await page.screenshot({ path: "/tmp/reel-upload-caption-error.png" }).catch(() => {});
+      }
+    }
+
     success = true;
 
   } finally {

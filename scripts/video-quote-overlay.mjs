@@ -38,13 +38,18 @@ function findFont() {
 }
 
 /**
- * Escape special chars for ffmpeg drawtext filter:
- *   ' → \' and : → \: and \ → \\
+ * Escape special chars for ffmpeg drawtext filter.
+ * Text is wrapped in single quotes (text='...'), so:
+ *   - Backslash → \\ (escaped backslash)
+ *   - Apostrophe ' → ' (U+2019 right single quotation mark — visually identical,
+ *     avoids breaking the single-quoted filter string)
+ *   - Colon → \:  (option separator)
+ *   - Square brackets → \[ \]  (expression delimiters)
  */
 function escapeDrawtext(text) {
   return text
     .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
+    .replace(/'/g, "\u2019")   // curly apostrophe — safe inside ffmpeg single-quoted text
     .replace(/:/g, "\\:")
     .replace(/\[/g, "\\[")
     .replace(/\]/g, "\\]");
@@ -70,10 +75,10 @@ function wrapText(text, maxChars) {
   }
   if (current) lines.push(current);
 
-  // Hard-cap at 3 lines
-  if (lines.length > 3) {
-    lines[2] = lines.slice(2).join(" ");
-    return lines.slice(0, 3);
+  // Hard-cap at 4 lines (3 was too few — force-joining overflow made line 3 overflow the box)
+  if (lines.length > 4) {
+    lines[3] = lines.slice(3).join(" ");
+    return lines.slice(0, 4);
   }
   return lines;
 }
@@ -135,32 +140,48 @@ export function overlayQuoteOnVideo(inputPath, quote, outputPath) {
   const font = findFont();
   const fontOption = font ? `:fontfile='${escapeDrawtext(font)}'` : "";
 
-  // Get actual dimensions for precise scaling
-  const { w, h } = getVideoDimensions(inputPath);
-  console.log(`[overlay] Video dimensions: ${w}x${h}`);
+  // Get source dimensions, then compute OUTPUT dimensions after 1080p cap.
+  // CRITICAL: all text layout must use OUTPUT dimensions, because the scale filter
+  // runs first in the chain — text is drawn onto the already-scaled frame.
+  const { w: srcW, h: srcH } = getVideoDimensions(inputPath);
+  console.log(`[overlay] Source dimensions: ${srcW}x${srcH}`);
 
-  // Scale: wrap at ~22 chars for narrow (≤480px), ~30 for wider
-  const maxChars = w <= 480 ? 22 : 30;
-  const lines = wrapText(quote, maxChars);
+  // Output dimensions after scale='min(1080,iw)':-2
+  const outW = Math.min(1080, srcW);
+  const outH = Math.round(srcH * (outW / srcW));
+  // Ensure outH is divisible by 2 (libx264 requirement)
+  const safeOutH = outH % 2 === 0 ? outH : outH - 1;
+  console.log(`[overlay] Output dimensions: ${outW}x${safeOutH}`);
+
+  // Char-wrap: 22 chars per line across all resolutions keeps text inside the box.
+  // Wider lines look fine visually but overflow the box width at large font sizes.
+  const maxChars = 22;
+  const lines    = wrapText(quote, maxChars);
   const numLines = lines.length;
 
-  // Typography — all in pixels relative to actual video size
-  const fontSize   = Math.round(h * 0.057);          // ~57px for 1000px height
-  const lineH      = Math.round(fontSize * 1.55);     // line-to-line spacing
-  const padV       = Math.round(fontSize * 0.9);      // vertical padding inside box
-  const padH       = Math.round(w * 0.05);            // horizontal padding inside box
+  // Typography — all in pixels relative to OUTPUT size.
+  // Cap by BOTH frame height (readability) AND box width (no overflow).
+  //   charWidthRatio ≈ 0.58 for Avenir Next / Helvetica Neue (proportional font)
+  const boxW0          = Math.round(outW * 0.90);  // pre-compute for font-size cap
+  const fontSizeByH    = Math.round(safeOutH * 0.042);
+  const fontSizeByW    = Math.round(boxW0 / (maxChars * 0.58));
+  const fontSize       = Math.min(fontSizeByH, fontSizeByW);
+  const lineH      = Math.round(fontSize * 1.55);
+  const padV       = Math.round(fontSize * 0.9);
 
-  const textBlockH  = numLines * lineH - Math.round(fontSize * 0.55); // total text block height
-  const boxH        = textBlockH + padV * 2;
-  const boxY        = Math.round((h - boxH) / 2);     // centered vertically
-  const boxX        = Math.round(w * 0.05);
-  const boxW        = Math.round(w * 0.90);
+  const textBlockH = numLines * lineH - Math.round(fontSize * 0.55);
+  const boxH       = textBlockH + padV * 2;
+  const boxY       = Math.round((safeOutH - boxH) / 2);
+  const boxX       = Math.round(outW * 0.05);
+  const boxW       = boxW0;   // already computed above
+  const textStartY = boxY + padV;
 
-  const textStartY  = boxY + padV;
+  // Build filter chain (scale runs first, then draw onto scaled frame):
+  //   1. scale     — cap at 1080p
+  //   2. drawbox   — semi-transparent dark background
+  //   3-N. drawtext — one per line
+  const scaleFilter = `scale=${outW}:${safeOutH}`;   // explicit px, not expressions
 
-  // Build filter chain:
-  //   1. drawbox  — semi-transparent dark background
-  //   2-N. drawtext — one per line
   const drawBoxFilter =
     `drawbox=x=${boxX}:y=${boxY}:w=${boxW}:h=${boxH}` +
     `:color=black@0.65:t=fill`;
@@ -180,15 +201,10 @@ export function overlayQuoteOnVideo(inputPath, quote, outputPath) {
     );
   });
 
-  // Scale down to 1080p portrait max — Instagram re-encodes to 1080p anyway,
-  // and smaller files upload much faster. Uses scale2ref to preserve aspect ratio.
-  // If the video is already ≤1080px wide we skip this (scale filter is a no-op when
-  // w is already ≤ 1080, but we still want the drawtext on top).
-  const scaleFilter   = `scale='min(1080,iw)':'-2'`;   // keep width ≤1080, height auto
   const filterComplex = [scaleFilter, drawBoxFilter, ...drawTextFilters].join(",");
 
   console.log(`[overlay] Applying ${numLines}-line quote: "${quote}"`);
-  console.log(`[overlay] Font size: ${fontSize}px, box: ${boxX},${boxY} ${boxW}x${boxH}`);
+  console.log(`[overlay] Font: ${fontSize}px, box: ${boxX},${boxY} ${boxW}x${boxH}`);
 
   execFileSync(ffmpegBin, [
     "-i",  inputPath,
