@@ -463,63 +463,41 @@ export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl
         const captionEl = await page.$(captionSelector);
         if (!captionEl) throw new Error("Caption contenteditable not found in edit modal");
 
-        // Click to focus, select-all any existing text, then type the caption.
-        // page.keyboard.type() fires real keydown/keypress/input/keyup events —
-        // React's synthetic event system responds to these and updates its state.
-        await captionEl.click();
-        await sleep(300);
-        await page.keyboard.down("Meta"); // Cmd+A = select all on Mac
-        await page.keyboard.press("a");
-        await page.keyboard.up("Meta");
-        await sleep(200);
-        await page.keyboard.type(caption, { delay: 15 });
-        await sleep(800);
-
-        // ── CRITICAL: Dismiss hashtag autocomplete by clicking media preview ─
-        // Typing hashtags opens Instagram's suggestion dropdown.  Clicking "Done"
-        // while it's open closes the dropdown instead of saving the caption.
-        // Fix: click on the media preview (left panel of modal) to blur the
-        // caption field and dismiss the dropdown.
-        // ⚠ Do NOT press Escape — that closes the entire Edit modal.
-        await page.evaluate(() => {
-          const dialog = document.querySelector('[role="dialog"]');
-          if (!dialog) return;
-          // Click on the video/image preview inside the modal (left panel)
-          const media = dialog.querySelector("video, canvas, img[src]");
-          if (media) { media.click(); return; }
-          // Fallback: click at 25% x, 50% y of dialog (image preview region)
-          const b = dialog.getBoundingClientRect();
-          const el = document.elementFromPoint(b.left + b.width * 0.25, b.top + b.height * 0.5);
-          if (el) el.click();
-        });
-        await sleep(800);
-
-        // Verify text using the existing element handle — avoids the issue where
-        // Instagram mutates aria-label after typing (adds character count) which
-        // would make document.querySelector return null on a re-query.
-        const captionResult = await captionEl.evaluate(el =>
-          el.isConnected
-            ? `${el.textContent.trim().length} chars: "${el.textContent.trim().slice(0, 80)}"`
-            : "element detached from DOM"
-        );
-        log(`Caption entered: ${captionResult}`);
-        await page.screenshot({ path: "/tmp/reel-caption-before-done.png" });
-
-        // Intercept the edit_media request body to verify the caption is sent
+        // ── Intercept edit_media and inject caption_text ─────────────────────
+        // Instagram's Lexical editor never exposes its internal state to our
+        // automation code (keyboard.type / execCommand / CDP insertText all
+        // update the DOM but not Lexical's EditorState). When Done is clicked
+        // the edit_media POST body has no caption_text field.
+        // Fix: intercept the outgoing edit_media request and add caption_text
+        // before it reaches Instagram's servers. The server applies the caption.
         await page.setRequestInterception(true);
-        const reqHandler = (req) => {
-          if (req.url().includes("edit_media") || req.url().includes("web/edit")) {
-            const body = req.postData() || "";
-            const captionInBody = body.includes("caption") ? body.slice(0, 300) : "(no caption field)";
-            log(`[edit_media REQUEST] ${captionInBody}`);
+        const reqHandler = async (req) => {
+          const url = req.url();
+          if (url.includes("edit_media") || url.includes("web/edit")) {
+            const raw = req.postData() || "{}";
+            log(`[edit_media original body] ${raw.slice(0, 300)}`);
+            try {
+              // Body is JSON — parse, inject caption_text, re-stringify
+              const body = JSON.parse(raw);
+              body.caption_text = caption;
+              const newBody = JSON.stringify(body);
+              log(`[edit_media injected] caption_text length=${caption.length}`);
+              req.continue({ postData: newBody });
+            } catch (_) {
+              // Fallback: URL-encoded form body — append caption_text field
+              const appended = raw
+                ? `${raw}&caption_text=${encodeURIComponent(caption)}`
+                : `caption_text=${encodeURIComponent(caption)}`;
+              log(`[edit_media injected URL-encoded] caption_text length=${caption.length}`);
+              req.continue({ postData: appended });
+            }
+          } else {
+            req.continue();
           }
-          req.continue();
         };
         page.on("request", reqHandler);
 
-        // Click "Done" in the Edit modal header.
-        // Use y < 200 (not 150) — the header sits at ~100 px but give extra room
-        // for minor viewport/zoom differences across Instagram A/B variants.
+        // Click "Done" — triggers the edit_media POST which we'll intercept
         const doneClicked = await page.evaluate(() => {
           const all = Array.from(document.querySelectorAll("button, div[role='button']"));
           const done = all.find(el => {
