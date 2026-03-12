@@ -475,6 +475,25 @@ export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl
         await page.keyboard.type(caption, { delay: 15 });
         await sleep(800);
 
+        // ── CRITICAL: Dismiss hashtag autocomplete by clicking media preview ─
+        // Typing hashtags opens Instagram's suggestion dropdown.  Clicking "Done"
+        // while it's open closes the dropdown instead of saving the caption.
+        // Fix: click on the media preview (left panel of modal) to blur the
+        // caption field and dismiss the dropdown.
+        // ⚠ Do NOT press Escape — that closes the entire Edit modal.
+        await page.evaluate(() => {
+          const dialog = document.querySelector('[role="dialog"]');
+          if (!dialog) return;
+          // Click on the video/image preview inside the modal (left panel)
+          const media = dialog.querySelector("video, canvas, img[src]");
+          if (media) { media.click(); return; }
+          // Fallback: click at 25% x, 50% y of dialog (image preview region)
+          const b = dialog.getBoundingClientRect();
+          const el = document.elementFromPoint(b.left + b.width * 0.25, b.top + b.height * 0.5);
+          if (el) el.click();
+        });
+        await sleep(800);
+
         // Verify text using the existing element handle — avoids the issue where
         // Instagram mutates aria-label after typing (adds character count) which
         // would make document.querySelector return null on a re-query.
@@ -485,6 +504,18 @@ export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl
         );
         log(`Caption entered: ${captionResult}`);
         await page.screenshot({ path: "/tmp/reel-caption-before-done.png" });
+
+        // Intercept the edit_media request body to verify the caption is sent
+        await page.setRequestInterception(true);
+        const reqHandler = (req) => {
+          if (req.url().includes("edit_media") || req.url().includes("web/edit")) {
+            const body = req.postData() || "";
+            const captionInBody = body.includes("caption") ? body.slice(0, 300) : "(no caption field)";
+            log(`[edit_media REQUEST] ${captionInBody}`);
+          }
+          req.continue();
+        };
+        page.on("request", reqHandler);
 
         // Click "Done" in the Edit modal header.
         // Use y < 200 (not 150) — the header sits at ~100 px but give extra room
@@ -500,7 +531,10 @@ export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl
           return false;
         });
         log(`Done button clicked: ${doneClicked}`);
-        await sleep(3000);
+        await sleep(4000);
+
+        page.off("request", reqHandler);
+        await page.setRequestInterception(false);
 
         // Log intercepted API calls for diagnostics
         page.off("response", responseHandler);
