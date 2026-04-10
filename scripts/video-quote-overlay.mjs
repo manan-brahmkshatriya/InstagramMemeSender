@@ -130,7 +130,7 @@ function getVideoDimensions(inputPath) {
  * @param {string} [outputPath] - Output path (default: same dir, "-overlay" suffix)
  * @returns {Promise<string>} Path to the processed video
  */
-export function overlayQuoteOnVideo(inputPath, quote, outputPath) {
+export function overlayQuoteOnVideo(inputPath, quote, outputPath, hookText = null) {
   if (!outputPath) {
     const ext  = path.extname(inputPath);
     const base = inputPath.slice(0, -ext.length);
@@ -201,7 +201,22 @@ export function overlayQuoteOnVideo(inputPath, quote, outputPath) {
     );
   });
 
-  const filterComplex = [scaleFilter, drawBoxFilter, ...drawTextFilters].join(",");
+  // Optional hook text banner at the very top of the video
+  const hookFilters = [];
+  if (hookText) {
+    const escapedHook = escapeDrawtext(hookText);
+    const hookFontSize = Math.round(fontSize * 0.48);
+    const hookBarH     = Math.round(hookFontSize * 2.2);
+    const hookTextY    = Math.round((hookBarH - hookFontSize) / 2);
+    hookFilters.push(
+      `drawbox=x=0:y=0:w=iw:h=${hookBarH}:color=black@0.60:t=fill`,
+      `drawtext=text='${escapedHook}'${fontOption}:fontsize=${hookFontSize}` +
+        `:fontcolor=white:x=(w-text_w)/2:y=${hookTextY}` +
+        `:shadowcolor=black@0.5:shadowx=1:shadowy=1`
+    );
+  }
+
+  const filterComplex = [scaleFilter, drawBoxFilter, ...drawTextFilters, ...hookFilters].join(",");
 
   console.log(`[overlay] Applying ${numLines}-line quote: "${quote}"`);
   console.log(`[overlay] Font: ${fontSize}px, box: ${boxX},${boxY} ${boxW}x${boxH}`);
@@ -220,5 +235,58 @@ export function overlayQuoteOnVideo(inputPath, quote, outputPath) {
   ], { stdio: "pipe" });
 
   console.log(`[overlay] Done → ${outputPath}`);
+  return outputPath;
+}
+
+/**
+ * Mix a background music track into a video file using ffmpeg.
+ * Music volume is set to 18% so the motivational quote stays the focus.
+ * Works whether the source video has existing audio or is completely silent.
+ *
+ * @param {string} videoPath  - Path to source video (.mp4)
+ * @param {string} musicPath  - Path to music file (.mp3 / .m4a / .wav / .aac)
+ * @param {string} [outputPath] - Output path (default: "-music" suffix)
+ * @returns {string} Path to the output video with mixed audio
+ */
+export function addBackgroundMusic(videoPath, musicPath, outputPath) {
+  if (!outputPath) {
+    const ext  = path.extname(videoPath);
+    const base = videoPath.slice(0, -ext.length);
+    outputPath = `${base}-music${ext}`;
+  }
+
+  // Probe whether the video already has an audio stream
+  let hasAudio = false;
+  try {
+    const ffprobeBin = path.join(path.dirname(ffmpegBin), "ffprobe");
+    const probeBin   = existsSync(ffprobeBin) ? ffprobeBin : ffmpegBin.replace("ffmpeg", "ffprobe");
+    const out  = execFileSync(probeBin, [
+      "-v", "quiet", "-print_format", "json", "-show_streams", videoPath,
+    ]).toString();
+    hasAudio = JSON.parse(out).streams.some(s => s.codec_type === "audio");
+  } catch {}
+
+  // If original video has audio, mix it with music; otherwise, just use music.
+  const filterComplex = hasAudio
+    ? "[0:a]volume=1.0[va];[1:a]volume=0.18[ma];[va][ma]amix=inputs=2:duration=first[a]"
+    : "[1:a]volume=0.18[a]";
+
+  console.log(`[music] Mixing → ${path.basename(musicPath)}  (hasOriginalAudio=${hasAudio})`);
+
+  execFileSync(ffmpegBin, [
+    "-i",             videoPath,
+    "-i",             musicPath,
+    "-filter_complex", filterComplex,
+    "-map",           "0:v",
+    "-map",           "[a]",
+    "-c:v",           "copy",   // no video re-encode — fast
+    "-c:a",           "aac",
+    "-b:a",           "192k",
+    "-shortest",               // output length = video length
+    "-y",
+    outputPath,
+  ], { stdio: "pipe" });
+
+  console.log(`[music] Done → ${outputPath}`);
   return outputPath;
 }

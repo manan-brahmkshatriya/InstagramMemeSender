@@ -19,3 +19,8 @@ dist/
 # macOS
 .DS_Store
 ios-app/.derived/
+scripts/music/*.mp3
+scripts/music/*.m4a
+scripts/music/*.aac
+scripts/music/*.wav
+scripts/music/*.ogg

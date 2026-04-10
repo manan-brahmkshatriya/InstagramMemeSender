@@ -170,6 +170,10 @@ async function waitForShareComplete(page, timeoutMs = 60000) {
 }
 
 // ── Main export ────────────────────────────────────────────────────────────
+// NOTE: Instagram's desktop web upload flow has NO "Add audio from library"
+// button — that feature is mobile-only. Background music is instead baked
+// into the video file via ffmpeg before upload (see reel-generator-daemon.mjs
+// and video-quote-overlay.mjs → addBackgroundMusic).
 
 /**
  * Upload an MP4 as an Instagram Reel to the logged-in account's feed.
@@ -180,7 +184,7 @@ async function waitForShareComplete(page, timeoutMs = 60000) {
  * @param {string} profileUrl - Full Instagram profile URL (used to find post after share for caption editing)
  * @returns {Promise<boolean>}
  */
-export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl = null) {
+export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl = null, firstComment = null) {
   if (!fs.existsSync(filePath))  throw new Error(`Video not found: ${filePath}`);
   if (!fs.existsSync(cookieFile)) throw new Error(`Cookie file not found: ${cookieFile}`);
 
@@ -522,6 +526,46 @@ export async function uploadReelToFeed(filePath, caption, cookieFile, profileUrl
 
         await page.screenshot({ path: "/tmp/reel-upload-caption-saved.png" });
         log("✅ Caption edit flow completed!");
+
+        // ── Step 11: Post hashtags as first comment ──────────────────────
+        // Keeps caption clean (better engagement) while hashtags still index the post.
+        // Uses Instagram's own /api/v1/web/comments/{mediaId}/add/ endpoint directly
+        // so we avoid Lexical editor issues entirely.
+        if (firstComment && firstComment.trim().length > 0) {
+          log("Step 11: Posting hashtags as first comment...");
+          try {
+            const commentResult = await page.evaluate(async (commentText) => {
+              // Convert shortcode from URL to numeric media ID
+              const urlMatch = window.location.href.match(/\/(reel|p)\/([A-Za-z0-9_-]+)/);
+              if (!urlMatch) return { ok: false, error: "not on post page" };
+              const shortcode = urlMatch[2];
+              const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+              let mediaId = BigInt(0);
+              for (const char of shortcode) mediaId = mediaId * BigInt(64) + BigInt(CHARS.indexOf(char));
+
+              const csrf = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || "";
+              const res  = await fetch(`/api/v1/web/comments/${mediaId.toString()}/add/`, {
+                method: "POST",
+                headers: {
+                  "Content-Type":    "application/x-www-form-urlencoded",
+                  "X-CSRFToken":     csrf,
+                  "X-Requested-With": "XMLHttpRequest",
+                },
+                body: new URLSearchParams({ comment_text: commentText }).toString(),
+                credentials: "include",
+              });
+              return { ok: res.ok, status: res.status };
+            }, firstComment);
+
+            if (commentResult.ok) {
+              log(`✅ Hashtags posted as first comment (HTTP ${commentResult.status})`);
+            } else {
+              log(`First comment failed: HTTP ${commentResult.status}`);
+            }
+          } catch (commentErr) {
+            log(`First comment error: ${commentErr.message}`);
+          }
+        }
       } catch (editErr) {
         log(`Caption edit failed: ${editErr.message} — post published without caption`);
         await page.screenshot({ path: "/tmp/reel-upload-caption-error.png" }).catch(() => {});
